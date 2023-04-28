@@ -1,0 +1,17 @@
+name: Build and Push Container Image
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    strategy:
+      matrix:
+        service: [subway]
+    uses: NodleCode/actions-common/.github/workflows/docker-build-and-push.yml@main
+    with:
+      name: service/${{ matrix.service }}
+    secrets:
+      project-id: ${{ secrets.PROJECT_ID }}
+      service-account-email: ${{ secrets.SERVICE_ACCOUNT_EMAIL }}
+      workload-identity-provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
