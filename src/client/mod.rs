@@ -6,15 +6,19 @@ use jsonrpsee::{
         client::{ClientT, Subscription, SubscriptionClientT},
         Error, JsonValue,
     },
-    types::error::CallError,
+    types::ErrorObjectOwned,
     ws_client::{WsClient, WsClientBuilder},
 };
-use tracing::instrument;
+use opentelemetry::trace::FutureExt;
+
+use crate::helpers::{self, errors};
 
 #[cfg(test)]
 pub mod mock;
 #[cfg(test)]
 mod tests;
+
+const TRACER: helpers::telemetry::Tracer = helpers::telemetry::Tracer::new("client");
 
 pub struct Client {
     sender: tokio::sync::mpsc::Sender<Message>,
@@ -71,8 +75,8 @@ impl Client {
                     WsClientBuilder::default()
                         .request_timeout(std::time::Duration::from_secs(30))
                         .connection_timeout(std::time::Duration::from_secs(30))
-                        .max_buffer_capacity_per_subscription(1024)
-                        .max_concurrent_requests(1024)
+                        .max_buffer_capacity_per_subscription(2048)
+                        .max_concurrent_requests(2048)
                         .build(url)
                         .map_err(|e| (e, url.to_string()))
                 };
@@ -95,7 +99,8 @@ impl Client {
                         }
                         Err((e, url)) => {
                             tracing::warn!("Unable to connect to endpoint: '{url}' error: {e}");
-                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            // TODO: use a backoff strategy
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         }
                     }
                 }
@@ -121,7 +126,7 @@ impl Client {
                                     }
                                 }
                                 Err(err) => {
-                                    tracing::debug!("Request failed: {:?}", err);
+                                    tracing::info!("Request failed: {:?}", err);
                                     match err {
                                         Error::RequestTimeout => {
                                             if let Err(e) = tx.send(Message::RotateEndpoint).await {
@@ -144,7 +149,15 @@ impl Client {
                                                 );
                                             }
                                         }
-                                        Error::Transport(_) | Error::RestartNeeded(_) => {
+                                        Error::Transport(_)
+                                        | Error::RestartNeeded(_)
+                                        | Error::MaxSlotsExceeded => {
+                                            // TODO: use a backoff strategy
+                                            tokio::time::sleep(std::time::Duration::from_millis(
+                                                200,
+                                            ))
+                                            .await;
+
                                             if let Err(e) = tx
                                                 .send(Message::Request {
                                                     method,
@@ -208,7 +221,15 @@ impl Client {
                                                 );
                                             }
                                         }
-                                        Error::Transport(_) | Error::RestartNeeded(_) => {
+                                        Error::Transport(_)
+                                        | Error::RestartNeeded(_)
+                                        | Error::MaxSlotsExceeded => {
+                                            // TODO: use a backoff strategy
+                                            tokio::time::sleep(std::time::Duration::from_millis(
+                                                200,
+                                            ))
+                                            .await;
+
                                             if let Err(e) = tx
                                                 .send(Message::Subscribe {
                                                     subscribe,
@@ -244,7 +265,7 @@ impl Client {
             loop {
                 tokio::select! {
                     _ = disconnect_rx.recv() => {
-                        tracing::debug!("Disconnected from endpoint");
+                        tracing::info!("Disconnected from endpoint");
                         ws = build_ws().await;
                     }
                     message = rx.recv() => {
@@ -267,8 +288,12 @@ impl Client {
         Ok(Self { sender: tx })
     }
 
-    #[instrument(skip(self, params))]
-    pub async fn request(&self, method: &str, params: Vec<JsonValue>) -> Result<JsonValue, Error> {
+    pub async fn request(
+        &self,
+        method: &str,
+        params: Vec<JsonValue>,
+    ) -> Result<JsonValue, ErrorObjectOwned> {
+        let cx = TRACER.context(method.to_string());
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.sender
             .send(Message::Request {
@@ -277,18 +302,22 @@ impl Client {
                 response: tx,
             })
             .await
-            .map_err(|e| CallError::Failed(e.into()))?;
+            .map_err(errors::internal_error)?;
 
-        rx.await.map_err(|e| CallError::Failed(e.into()))?
+        rx.with_context(cx)
+            .await
+            .map_err(errors::internal_error)?
+            .map_err(errors::map_error)
     }
 
-    #[instrument(skip(self, params, unsubscribe))]
     pub async fn subscribe(
         &self,
         subscribe: &str,
         params: Vec<JsonValue>,
         unsubscribe: &str,
     ) -> Result<Subscription<JsonValue>, Error> {
+        let cx = TRACER.context(subscribe.to_string());
+
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.sender
             .send(Message::Subscribe {
@@ -298,12 +327,11 @@ impl Client {
                 response: tx,
             })
             .await
-            .map_err(|e| CallError::Failed(e.into()))?;
+            .map_err(errors::failed)?;
 
-        rx.await.map_err(|e| CallError::Failed(e.into()))?
+        rx.with_context(cx).await.map_err(errors::failed)?
     }
 
-    #[instrument(skip(self))]
     pub async fn rotate_endpoint(&self) -> Result<(), ()> {
         self.sender
             .send(Message::RotateEndpoint)

@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use jsonrpsee::core::{Error, JsonValue};
-use tracing::instrument;
+use jsonrpsee::{core::JsonValue, types::ErrorObjectOwned};
 
-use super::{Middleware, NextFn};
-use crate::client::Client;
+use crate::{
+    client::Client,
+    middleware::{Middleware, NextFn},
+};
 
 #[derive(Debug, Default)]
 pub struct Extra {
@@ -40,13 +41,12 @@ impl UpstreamMiddleware {
 }
 
 #[async_trait]
-impl Middleware<CallRequest, Result<JsonValue, Error>> for UpstreamMiddleware {
-    #[instrument(skip_all)]
+impl Middleware<CallRequest, Result<JsonValue, ErrorObjectOwned>> for UpstreamMiddleware {
     async fn call(
         &self,
         request: CallRequest,
-        _next: NextFn<CallRequest, Result<JsonValue, Error>>,
-    ) -> Result<JsonValue, Error> {
+        _next: NextFn<CallRequest, Result<JsonValue, ErrorObjectOwned>>,
+    ) -> Result<JsonValue, ErrorObjectOwned> {
         self.client.request(&request.method, request.params).await
     }
 }

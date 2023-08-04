@@ -1,7 +1,7 @@
 use opentelemetry::global::shutdown_tracer_provider;
 use rand::{seq::SliceRandom, thread_rng};
 
-use subway::{client, config, enable_logger, server, telemetry::setup_telemetry};
+use subway::{client, config, logger::enable_logger, server, telemetry::setup_telemetry};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -12,9 +12,9 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let tracer = setup_telemetry(&config.telemetry)?;
+    let _tracer = setup_telemetry(&config.telemetry)?;
 
-    enable_logger(tracer);
+    enable_logger();
 
     tracing::trace!("{:#?}", config);
 

@@ -5,6 +5,7 @@ methods:
         ty: Bytes
 
   - method: author_pendingExtrinsics
+    cache_ttl_seconds: 1
 
   - method: chain_getBlockHash
     cache: 2000
@@ -31,6 +32,7 @@ methods:
         inject: true
 
   - method: chain_getFinalizedHead
+    cache_ttl_seconds: 1
 
   - method: state_getRuntimeVersion
     cache: 2000
@@ -102,10 +104,10 @@ methods:
     cache: 1
 
   - method: system_name
-    cache: 1
+    response: Subway
 
   - method: system_version
-    cache: 1
+    response: 1.0.0-dev
 
   - method: system_chainType
     cache: 1
@@ -114,7 +116,7 @@ methods:
     cache: 1
 
   - method: system_nodeRoles
-    cache: 1
+    response: [ 'Full' ]
 
   - method: system_localListenAddresses
     cache: 1
@@ -151,6 +153,11 @@ subscriptions:
     name: chain_finalizedHead
     merge_strategy: replace
 
+  - subscribe: chain_subscribeAllHeads
+    unsubscribe: chain_unsubscribeAllHeads
+    name: chain_allHead
+    merge_strategy: replace
+
   - subscribe: state_subscribeRuntimeVersion
     unsubscribe: state_unsubscribeRuntimeVersion
     name: state_runtimeVersion
@@ -164,5 +171,6 @@ subscriptions:
 aliases:
   - [ chain_subscribeNewHeads, chain_subscribeNewHead ]
   - [ chain_unsubscribeNewHeads, chain_unsubscribeNewHead ]
+  - [ chain_getBlockHash, chain_getHead ]
   - [ state_getKeysPaged, state_getKeysPagedAt ]
   - [ state_getStorage, state_getStorageAt ]

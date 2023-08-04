@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use blake2::Blake2b512;
 use jsonrpsee::{
-    core::{JsonValue, SubscriptionCallbackError},
+    core::{JsonValue, StringError},
     SubscriptionMessage,
 };
 use serde::{Deserialize, Serialize};
@@ -11,12 +11,12 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{broadcast, RwLock};
-use tracing::instrument;
 
-use super::{Middleware, NextFn};
 use crate::{
-    cache::CacheKey, client::Client, config::MergeStrategy,
-    middleware::subscription::SubscriptionRequest,
+    cache::CacheKey,
+    client::Client,
+    config::MergeStrategy,
+    middleware::{subscription::SubscriptionRequest, Middleware, NextFn},
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -100,7 +100,7 @@ impl MergeSubscriptionMiddleware {
         unsubscribe: String,
     ) -> Result<
         Box<dyn FnOnce() -> broadcast::Receiver<SubscriptionMessage> + Sync + Send + 'static>,
-        SubscriptionCallbackError,
+        StringError,
     > {
         if let Some(tx) = self.upstream_subs.read().await.get(&key).cloned() {
             tracing::trace!("Found existing upstream subscription for {}", &subscribe);
@@ -112,8 +112,7 @@ impl MergeSubscriptionMiddleware {
         let mut subscription = self
             .client
             .subscribe(&subscribe, params.clone(), &unsubscribe)
-            .await
-            .map_err(|e| SubscriptionCallbackError::Some(e.to_string()))?;
+            .await?;
 
         let (tx, _) = broadcast::channel(1024);
 
@@ -190,15 +189,12 @@ impl MergeSubscriptionMiddleware {
 }
 
 #[async_trait]
-impl Middleware<SubscriptionRequest, Result<(), SubscriptionCallbackError>>
-    for MergeSubscriptionMiddleware
-{
-    #[instrument(skip_all, fields(method = request.subscribe))]
+impl Middleware<SubscriptionRequest, Result<(), StringError>> for MergeSubscriptionMiddleware {
     async fn call(
         &self,
         request: SubscriptionRequest,
-        _next: NextFn<SubscriptionRequest, Result<(), SubscriptionCallbackError>>,
-    ) -> Result<(), SubscriptionCallbackError> {
+        _next: NextFn<SubscriptionRequest, Result<(), StringError>>,
+    ) -> Result<(), StringError> {
         let key = CacheKey::new(&request.subscribe, &request.params);
 
         let sink = request.sink.accept().await?;

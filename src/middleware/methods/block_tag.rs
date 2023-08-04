@@ -1,10 +1,11 @@
 use async_trait::async_trait;
-use jsonrpsee::core::{Error, JsonValue};
+use jsonrpsee::{core::JsonValue, types::ErrorObjectOwned};
 use std::sync::Arc;
-use tracing::instrument;
 
-use super::{Middleware, NextFn};
-use crate::{api::EthApi, middleware::call::CallRequest};
+use crate::{
+    api::EthApi,
+    middleware::{call::CallRequest, Middleware, NextFn},
+};
 
 pub struct BlockTagMiddleware {
     api: Arc<EthApi>,
@@ -51,7 +52,7 @@ impl BlockTagMiddleware {
         };
 
         if let Some(value) = maybe_value {
-            log::debug!(
+            log::trace!(
                 "Replacing params {:?} updated with {:?}",
                 request.params,
                 (self.index, &value),
@@ -65,13 +66,12 @@ impl BlockTagMiddleware {
 }
 
 #[async_trait]
-impl Middleware<CallRequest, Result<JsonValue, Error>> for BlockTagMiddleware {
-    #[instrument(skip_all)]
+impl Middleware<CallRequest, Result<JsonValue, ErrorObjectOwned>> for BlockTagMiddleware {
     async fn call(
         &self,
         request: CallRequest,
-        next: NextFn<CallRequest, Result<JsonValue, Error>>,
-    ) -> Result<JsonValue, Error> {
+        next: NextFn<CallRequest, Result<JsonValue, ErrorObjectOwned>>,
+    ) -> Result<JsonValue, ErrorObjectOwned> {
         let request = self.replace(request).await;
         next(request).await
     }

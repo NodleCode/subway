@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 use blake2::Blake2b512;
-use jsonrpsee::core::{Error, JsonValue};
-use tracing::instrument;
+use jsonrpsee::{core::JsonValue, types::ErrorObjectOwned};
+use opentelemetry::trace::FutureExt;
 
-use super::{Middleware, NextFn};
 use crate::{
     cache::{Cache, CacheKey},
-    middleware::call::CallRequest,
+    helpers,
+    middleware::{call::CallRequest, Middleware, NextFn},
 };
 
 pub struct CacheMiddleware {
@@ -19,39 +19,44 @@ impl CacheMiddleware {
     }
 }
 
+const TRACER: helpers::telemetry::Tracer = helpers::telemetry::Tracer::new("cache-middleware");
+
 #[async_trait]
-impl Middleware<CallRequest, Result<JsonValue, Error>> for CacheMiddleware {
-    #[instrument(skip_all)]
+impl Middleware<CallRequest, Result<JsonValue, ErrorObjectOwned>> for CacheMiddleware {
     async fn call(
         &self,
         request: CallRequest,
-        next: NextFn<CallRequest, Result<JsonValue, Error>>,
-    ) -> Result<JsonValue, Error> {
-        if request.extra.bypass_cache {
-            return next(request).await;
-        }
-
-        let key = CacheKey::<Blake2b512>::new(&request.method, &request.params);
-
-        if let Some(value) = self.cache.get(&key) {
-            return Ok(value);
-        }
-
-        let result = next(request).await;
-
-        if let Ok(ref value) = result {
-            // avoid caching null value because it usually means data not available
-            // but it could be available in the future
-            if !value.is_null() {
-                let cache = self.cache.clone();
-                let value = value.clone();
-                tokio::spawn(async move {
-                    cache.insert(key, value).await;
-                });
+        next: NextFn<CallRequest, Result<JsonValue, ErrorObjectOwned>>,
+    ) -> Result<JsonValue, ErrorObjectOwned> {
+        async move {
+            if request.extra.bypass_cache {
+                return next(request).await;
             }
-        }
 
-        result
+            let key = CacheKey::<Blake2b512>::new(&request.method, &request.params);
+
+            if let Some(value) = self.cache.get(&key) {
+                return Ok(value);
+            }
+
+            let result = next(request).await;
+
+            if let Ok(ref value) = result {
+                // avoid caching null value because it usually means data not available
+                // but it could be available in the future
+                if !value.is_null() {
+                    let cache = self.cache.clone();
+                    let value = value.clone();
+                    tokio::spawn(async move {
+                        cache.insert(key, value).await;
+                    });
+                }
+            }
+
+            result
+        }
+        .with_context(TRACER.context("call"))
+        .await
     }
 }
 

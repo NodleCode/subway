@@ -1,12 +1,16 @@
 use futures::FutureExt;
 use jsonrpsee::core::JsonValue;
+use jsonrpsee::server::middleware::proxy_get_request::ProxyGetRequestLayer;
 use jsonrpsee::server::{RandomStringIdProvider, RpcModule, ServerBuilder, ServerHandle};
-use jsonrpsee::types::error::CallError;
+use jsonrpsee::types::ErrorObjectOwned;
+use opentelemetry::trace::FutureExt as _;
 use serde_json::json;
 use std::time::Duration;
-use std::{net::SocketAddr, num::NonZeroUsize, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 use crate::cache::new_cache;
+use crate::helpers::{self, errors};
+use crate::middleware::response::ResponseMiddleware;
 use crate::{
     api::{EthApi, SubstrateApi},
     client::Client,
@@ -31,7 +35,11 @@ pub async fn start_server(
     config: &Config,
     client: Client,
 ) -> anyhow::Result<(SocketAddr, ServerHandle)> {
-    let service_builder = tower::ServiceBuilder::new();
+    let service_builder =
+        tower::ServiceBuilder::new().option_layer(config.health.as_ref().map(|h| {
+            ProxyGetRequestLayer::new(h.path.clone(), h.method.clone())
+                .expect("Invalid health config")
+        }));
 
     let server = ServerBuilder::default()
         .set_middleware(service_builder)
@@ -41,6 +49,8 @@ pub async fn start_server(
         .await?;
 
     let mut module = RpcModule::new(());
+
+    let tracer = helpers::telemetry::Tracer::new("server");
 
     let client = Arc::new(client);
 
@@ -88,11 +98,18 @@ pub async fn start_server(
             )));
         }
 
-        if let Some(cache_size) = NonZeroUsize::new(method.cache) {
+        if let Some(ref resp) = method.response {
+            list.push(Arc::new(ResponseMiddleware::new(resp.clone())));
+        }
+
+        if let Some(cache_size) = method.cache_size() {
             // each method has it's own cache
             let cache = new_cache(
                 cache_size,
-                config.cache_ttl_seconds.map(Duration::from_secs),
+                method
+                    .cache_ttl_seconds
+                    .or(config.cache_ttl_seconds)
+                    .map(Duration::from_secs),
             );
             list.push(Arc::new(CacheMiddleware::new(cache)));
         }
@@ -100,36 +117,28 @@ pub async fn start_server(
 
         let middlewares = Arc::new(Middlewares::new(
             list,
-            Arc::new(|_| {
-                async {
-                    Err(
-                        jsonrpsee::types::error::CallError::Failed(anyhow::Error::msg(
-                            "Bad configuration",
-                        ))
-                        .into(),
-                    )
-                }
-                .boxed()
-            }),
+            Arc::new(|_| async { Err(errors::failed("Bad configuration")) }.boxed()),
         ));
 
         let method_name = string_to_static_str(method.method.clone());
         module.register_async_method(method_name, move |params, _| {
             let middlewares = middlewares.clone();
+
             async move {
+                let cx = tracer.context(method_name);
+
                 let parsed = params.parse::<JsonValue>()?;
                 let params = if parsed == JsonValue::Null {
                     vec![]
                 } else {
                     parsed
                         .as_array()
-                        .ok_or_else(|| {
-                            CallError::InvalidParams(anyhow::Error::msg("invalid params"))
-                        })?
+                        .ok_or_else(|| errors::invalid_params(""))?
                         .to_owned()
                 };
                 middlewares
                     .call(CallRequest::new(method_name, params))
+                    .with_context(cx)
                     .await
             }
         })?;
@@ -154,17 +163,7 @@ pub async fn start_server(
 
         let middlewares = Arc::new(Middlewares::new(
             list,
-            Arc::new(|_| {
-                async {
-                    Err(
-                        jsonrpsee::types::error::CallError::Failed(anyhow::Error::msg(
-                            "Bad configuration",
-                        ))
-                        .into(),
-                    )
-                }
-                .boxed()
-            }),
+            Arc::new(|_| async { Err("Bad configuration".into()) }.boxed()),
         ));
 
         module.register_subscription(
@@ -173,16 +172,17 @@ pub async fn start_server(
             unsubscribe_name,
             move |params, sink, _| {
                 let middlewares = middlewares.clone();
+
                 async move {
+                    let cx = tracer.context(name);
+
                     let parsed = params.parse::<JsonValue>()?;
                     let params = if parsed == JsonValue::Null {
                         vec![]
                     } else {
                         parsed
                             .as_array()
-                            .ok_or_else(|| {
-                                CallError::InvalidParams(anyhow::Error::msg("invalid params"))
-                            })?
+                            .ok_or_else(|| errors::invalid_params(""))?
                             .to_owned()
                     };
                     middlewares
@@ -192,6 +192,7 @@ pub async fn start_server(
                             unsubscribe: unsubscribe_name.into(),
                             sink,
                         })
+                        .with_context(cx)
                         .await
                 }
             },
@@ -212,7 +213,7 @@ pub async fn start_server(
     rpc_methods.sort();
 
     module.register_method("rpc_methods", move |_, _| {
-        Ok(json!({
+        Ok::<JsonValue, ErrorObjectOwned>(json!({
             "version": 1,
             "methods": rpc_methods
         }))
@@ -257,11 +258,14 @@ mod tests {
                     method: PHO.to_string(),
                     params: vec![],
                     cache: 0,
+                    cache_ttl_seconds: None,
+                    response: None,
                 }],
                 subscriptions: vec![],
                 aliases: vec![],
             },
             telemetry: None,
+            health: None,
         };
         let client = Client::new(&config.endpoints).await.unwrap();
         let (addr, server) = start_server(&config, client).await.unwrap();
@@ -279,7 +283,9 @@ mod tests {
 
         let mut module = RpcModule::new(());
         module
-            .register_method(PHO, |_, _| Ok(BAR.to_string()))
+            .register_method(PHO, |_, _| {
+                Ok::<std::string::String, ErrorObjectOwned>(BAR.to_string())
+            })
             .unwrap();
         let addr = format!("ws://{}", server.local_addr().unwrap());
         let handle = server.start(module).unwrap();

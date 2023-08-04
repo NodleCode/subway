@@ -2,7 +2,7 @@
 
 use std::net::SocketAddr;
 
-use crate::enable_logger;
+use crate::logger::enable_logger;
 
 use super::*;
 
@@ -44,7 +44,7 @@ impl TestServerBuilder {
                         .await
                         .unwrap();
                     let res = resp_rx.await;
-                    res.map_err(|e| -> Error { CallError::Failed(e.into()).into() })
+                    res.map_err(errors::failed)
                 }
             })
             .unwrap();
@@ -66,14 +66,14 @@ impl TestServerBuilder {
                     let sink = sink.accept().await.unwrap();
                     let _ = tx.send((params, sink)).await;
                 })
-                .map_err(|_| jsonrpsee::core::SubscriptionCallbackError::None)
+                .map_err(|_| "error".into())
             })
             .unwrap();
         rx
     }
 
     pub async fn build(self) -> (SocketAddr, ServerHandle) {
-        enable_logger(None);
+        enable_logger();
 
         let server = ServerBuilder::default()
             .set_id_provider(RandomStringIdProvider::new(16))
@@ -94,7 +94,7 @@ pub async fn dummy_server() -> (
     mpsc::Receiver<(JsonValue, oneshot::Sender<JsonValue>)>,
     mpsc::Receiver<(JsonValue, SubscriptionSink)>,
 ) {
-    enable_logger(None);
+    enable_logger();
 
     let mut builder = TestServerBuilder::new();
 
